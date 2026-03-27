@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(for dir:*)",
+      "Bash(do echo:*)",
+      "Read(//c/Users/Yang/Desktop/Sci_psd/DeepLearning_CV/Project1/**)",
+      "Bash(done)"
+    ]
+  }
+}
