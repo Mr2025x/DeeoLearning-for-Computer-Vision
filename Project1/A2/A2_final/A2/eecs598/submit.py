@@ -13,9 +13,11 @@ _A2_FILES = [
     "linear_classifier.ipynb",
     "two_layer_net.py",
     "two_layer_net.ipynb",
+    "challenge_problem.ipynb",
     "svm_best_model.pt",
     "softmax_best_model.pt",
     "nn_best_model.pt",
+    "hand_drawn_weights.jpeg",
 ]
 
 _A3_FILES = [
@@ -112,6 +114,8 @@ def _make_submission(
 
 
 def _get_user_info():
+    uniquename = None
+    umid = None
     if uniquename is None:
         uniquename = input("Enter your uniquename (e.g. justincj): ")
     if umid is None:

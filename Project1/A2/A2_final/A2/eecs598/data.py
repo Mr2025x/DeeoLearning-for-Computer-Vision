@@ -53,12 +53,12 @@ def cifar10(num_train=None, num_test=None, x_dtype=torch.float32):
     - x_test: `x_dtype` tensor of shape (num_test, 3, 32, 32)
     - y_test: int64 tensor of shape (num_test, 3, 32, 32)
     """
+    
     download = not os.path.isdir("cifar-10-batches-py")
     dset_train = CIFAR10(root=".", download=download, train=True)
     dset_test = CIFAR10(root=".", train=False)
     x_train, y_train = _extract_tensors(dset_train, num_train, x_dtype)
     x_test, y_test = _extract_tensors(dset_test, num_test, x_dtype)
-
     return x_train, y_train, x_test, y_test
 
 
