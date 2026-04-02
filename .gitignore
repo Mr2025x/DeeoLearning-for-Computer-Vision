@@ -1,0 +1,13 @@
+env/
+# 忽略整个仓库（包含所有子文件夹）中的 Python 缓存
+__pycache__/
+.ipynb_checkpoints/
+
+# 忽略整个仓库中的压缩包（拦截那个 166MB 的大文件）
+*.tar.gz
+
+# 忽略整个仓库中的模型权重文件
+*.pth
+
+# 忽略特定的数据集文件夹（无论它在哪个层级）
+cifar-10-batches-py/
