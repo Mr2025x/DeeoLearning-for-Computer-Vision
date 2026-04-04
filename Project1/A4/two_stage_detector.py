@@ -15,7 +15,6 @@ TensorDict = Dict[str, torch.Tensor]
 def hello_two_stage_detector():
     print("Hello from two_stage_detector.py!")
 
-
 class RPNPredictionNetwork(nn.Module):
     """
     RPN prediction network that accepts FPN feature maps from different levels
@@ -61,7 +60,18 @@ class RPNPredictionNetwork(nn.Module):
         # `FCOSPredictionNetwork` for this code block.
         stem_rpn = []
         # Replace "pass" statement with your code
-        pass
+        stem_rpn = []
+        prev_channels = in_channels
+        
+        for curr_channels in stem_channels:
+            conv = nn.Conv2d(prev_channels, curr_channels, kernel_size=3, stride=1, padding=1)
+            # 权重和偏置初始化
+            nn.init.normal_(conv.weight, mean=0.0, std=0.01)
+            nn.init.constant_(conv.bias, 0.0)
+            
+            stem_rpn.append(conv)
+            stem_rpn.append(nn.ReLU())
+            prev_channels = curr_channels
 
         # Wrap the layers defined by student into a `nn.Sequential` module:
         self.stem_rpn = nn.Sequential(*stem_rpn)
@@ -79,7 +89,17 @@ class RPNPredictionNetwork(nn.Module):
         self.pred_box = None  # Box regression conv
 
         # Replace "pass" statement with your code
-        pass
+        # Objectness: 每个位置输出 A 个分数
+        self.pred_obj = nn.Conv2d(stem_channels[-1], self.num_anchors, kernel_size=1)
+        
+        # Box Regression: 每个位置输出 A 个 Anchor 的 4 个偏移量，共 4*A 个值
+        self.pred_box = nn.Conv2d(stem_channels[-1], self.num_anchors * 4, kernel_size=1)
+        
+        # 别忘了对这两个 1x1 卷积也做相同的初始化
+        nn.init.normal_(self.pred_obj.weight, mean=0.0, std=0.01)
+        nn.init.constant_(self.pred_obj.bias, 0.0)
+        nn.init.normal_(self.pred_box.weight, mean=0.0, std=0.01)
+        nn.init.constant_(self.pred_box.bias, 0.0)
         ######################################################################
         #                           END OF YOUR CODE                         #
         ######################################################################
@@ -111,7 +131,27 @@ class RPNPredictionNetwork(nn.Module):
         boxreg_deltas = {}
 
         # Replace "pass" statement with your code
-        pass
+        for level_name, feature in feats_per_fpn_level.items():
+            B, _, H, W = feature.shape
+            
+            # 1. 穿过共享的 Stem 网络
+            stem_features = self.stem_rpn(feature)
+            
+            # 2. 获取初始预测 (形状为 [B, Channels, H, W])
+            obj_logits_raw = self.pred_obj(stem_features)  # 形状: [B, A, H, W]
+            box_deltas_raw = self.pred_box(stem_features)  # 形状: [B, A*4, H, W]
+            
+            # 3. 形状重组 (极其关键)
+            # Objectness: [B, A, H, W] -> [B, H, W, A] -> [B, H*W*A]
+            obj_logits_reshaped = obj_logits_raw.permute(0, 2, 3, 1).reshape(B, -1)
+            
+            # Box deltas: [B, A*4, H, W] -> [B, H, W, A*4] -> [B, H*W*A, 4]
+            # 这里最后多出一个 4 的维度，代表每个 anchor 的 dx, dy, dw, dh
+            box_deltas_reshaped = box_deltas_raw.permute(0, 2, 3, 1).reshape(B, -1, 4)
+            
+            # 存入字典
+            object_logits[level_name] = obj_logits_reshaped
+            boxreg_deltas[level_name] = box_deltas_reshaped
         ######################################################################
         #                           END OF YOUR CODE                         #
         ######################################################################
@@ -177,7 +217,32 @@ def generate_fpn_anchors(
             # locations to get top-left and bottom-right co-ordinates.
             ##################################################################
             # Replace "pass" statement with your code
-            pass
+            x_c = locations[:, 0]
+            y_c = locations[:, 1]
+            
+            # 2. 计算当前 FPN 层 Anchor 的基础面积
+            area = (stride_scale * level_stride) ** 2
+            
+            # 3. 根据面积和当前的长宽比计算真实的宽和高
+            import math
+            new_width = math.sqrt(area / aspect_ratio)
+            new_height = area / new_width
+            
+            # 4. 根据中心点和宽高，计算左上角 (x1, y1) 和 右下角 (x2, y2)
+            # 注意：这里的 x_c, y_c 是长度为 N 的一维张量，标量 new_width/2 会自动广播
+            x1 = x_c - new_width / 2.0
+            y1 = y_c - new_height / 2.0
+            x2 = x_c + new_width / 2.0
+            y2 = y_c + new_height / 2.0
+            
+            # 5. 将这四个坐标沿着列方向(dim=1)拼接起来
+            # 每一行代表一个 anchor 的 [x1, y1, x2, y2]
+            # 最终 box_coords shape: (N, 4)
+            box_coords = torch.stack([x1, y1, x2, y2], dim=1)
+            
+            # 6. 加入列表
+            anchor_boxes.append(box_coords)
+            
             ##################################################################
             #                           END OF YOUR CODE                     #
             ##################################################################
@@ -211,7 +276,34 @@ def iou(boxes1: torch.Tensor, boxes2: torch.Tensor) -> torch.Tensor:
     # TODO: Implement the IoU function here.                                 #
     ##########################################################################
     # Replace "pass" statement with your code
-    pass
+    # 1. 计算两组框各自的面积
+    # boxes shape: (M, 4) -> area shape: (M,)
+    area1 = (boxes1[:, 2] - boxes1[:, 0]) * (boxes1[:, 3] - boxes1[:, 1])
+    # boxes shape: (N, 4) -> area shape: (N,)
+    area2 = (boxes2[:, 2] - boxes2[:, 0]) * (boxes2[:, 3] - boxes2[:, 1])
+
+    # 2. 利用广播机制计算交集框的左上角 (lt) 和右下角 (rb)
+    # boxes1[:, None, :2] shape: (M, 1, 2)
+    # boxes2[None, :, :2] shape: (1, N, 2)
+    # torch.max broadcast 后的 lt shape: (M, N, 2)
+    lt = torch.max(boxes1[:, None, :2], boxes2[None, :, :2])  # 交集的 x1, y1
+    rb = torch.min(boxes1[:, None, 2:], boxes2[None, :, 2:])  # 交集的 x2, y2
+
+    # 3. 计算交集的宽和高，如果框不相交，用 clamp 保证宽高等于 0
+    # wh shape: (M, N, 2)
+    wh = (rb - lt).clamp(min=0) 
+
+    # 4. 计算交集面积
+    # inter shape: (M, N)
+    inter = wh[:, :, 0] * wh[:, :, 1]
+
+    # 5. 计算并集面积 (利用容斥原理和广播机制)
+    # area1[:, None] shape (M, 1) + area2[None, :] shape (1, N) 
+    # broadcast 后的 union shape: (M, N)
+    union = area1[:, None] + area2[None, :] - inter
+
+    # 6. 计算 IoU，并防止除以 0 的极小可能 (加上 1e-6 甚至可以省略，因为物理框通常面积大于0)
+    iou = inter / union
     ##########################################################################
     #                             END OF YOUR CODE                           #
     ##########################################################################
@@ -298,7 +390,36 @@ def rcnn_get_deltas_from_anchors(
     ##########################################################################
     deltas = None
     # Replace "pass" statement with your code
-    pass
+    # 1. 识别出哪些是无效的 (background/neutral) 框
+    # 在上一步中，无效框的坐标被填成了负数，所以只要 x1 < 0 就是无效框
+    invalid_mask = gt_boxes[:, 0] < 0
+
+    # 2. 将 Anchor 从 XYXY 转换为 CXCYWH
+    w_a = anchors[:, 2] - anchors[:, 0]
+    h_a = anchors[:, 3] - anchors[:, 1]
+    x_a = anchors[:, 0] + w_a / 2.0
+    y_a = anchors[:, 1] + h_a / 2.0
+
+    # 3. 将 GT Boxes 从 XYXY 转换为 CXCYWH
+    # 注意：为了防止无效框产生负数的宽高导致后续 torch.log() 报错，
+    # 我们用 .clamp(min=1.0) 强行让它的宽高等于 1 (反正是无效框，最后会被覆盖)
+    w_gt = (gt_boxes[:, 2] - gt_boxes[:, 0]).clamp(min=1.0)
+    h_gt = (gt_boxes[:, 3] - gt_boxes[:, 1]).clamp(min=1.0)
+    x_gt = gt_boxes[:, 0] + w_gt / 2.0
+    y_gt = gt_boxes[:, 1] + h_gt / 2.0
+
+    # 4. 按照公式计算 Deltas
+    dx = (x_gt - x_a) / w_a
+    dy = (y_gt - y_a) / h_a
+    dw = torch.log(w_gt / w_a)
+    dh = torch.log(h_gt / h_a)
+
+    # 5. 组合成 (N, 4) 的 Tensor
+    deltas = torch.stack([dx, dy, dw, dh], dim=1)
+
+    # 6. 【关键】将 background/neutral 样本的 Deltas 强行设为 -1e8
+    # 因为回归损失只在正样本上计算，这些 -1e8 的标记会在算 Loss 时被过滤掉
+    deltas[invalid_mask] = -1e8
     ##########################################################################
     #                             END OF YOUR CODE                           #
     ##########################################################################
@@ -333,7 +454,32 @@ def rcnn_apply_deltas_to_anchors(
     ##########################################################################
     output_boxes = None
     # Replace "pass" statement with your code
-    pass
+    # 1. 拆解网络预测的 Deltas
+    dx = deltas[:, 0]
+    dy = deltas[:, 1]
+    dw = deltas[:, 2]
+    dh = deltas[:, 3]
+
+    # 2. 将传入的 Anchor 从 XYXY 转换为 CXCYWH 格式
+    w_a = anchors[:, 2] - anchors[:, 0]
+    h_a = anchors[:, 3] - anchors[:, 1]
+    x_a = anchors[:, 0] + w_a / 2.0
+    y_a = anchors[:, 1] + h_a / 2.0
+
+    # 3. 逆向应用公式，解算出预测框的 CXCYWH
+    x_pred = dx * w_a + x_a
+    y_pred = dy * h_a + y_a
+    w_pred = torch.exp(dw) * w_a
+    h_pred = torch.exp(dh) * h_a
+
+    # 4. 将预测框从 CXCYWH 重新转回目标要求的 XYXY 格式
+    x1 = x_pred - w_pred / 2.0
+    y1 = y_pred - h_pred / 2.0
+    x2 = x_pred + w_pred / 2.0
+    y2 = y_pred + h_pred / 2.0
+
+    # 5. 沿着特征维度进行堆叠，形成 (N, 4) 的输出张量
+    output_boxes = torch.stack([x1, y1, x2, y2], dim=1)
     ##########################################################################
     #                             END OF YOUR CODE                           #
     ##########################################################################
@@ -504,7 +650,32 @@ class RPN(nn.Module):
             None,
         )
         # Replace "pass" statement with your code
-        pass
+        # 1. 前向传播：把 FPN 特征送入预测网络，得到 Objectness 分数和 Box 偏移量
+        # pred_obj_logits: Dict["p3/p4/p5", Tensor(B, HWA)]
+        # pred_boxreg_deltas: Dict["p3/p4/p5", Tensor(B, HWA, 4)]
+        pred_obj_logits, pred_boxreg_deltas = self.pred_net(feats_per_fpn_level)
+
+        # 2. 生成 Anchor：
+        # 2.1 提取每层特征图的 shape (B, C, H, W)，用于计算中心点坐标
+        shape_per_fpn_level = {
+            level_name: feat.shape for level_name, feat in feats_per_fpn_level.items()
+        }
+        
+        # 2.2 计算各层特征图映射回原图的中心点坐标 (x_c, y_c)
+        # 注意要传入 device 确保生成的 Tensor 和 特征图在同一个 GPU 上
+        locations_per_fpn_level = get_fpn_location_coords(
+            shape_per_fpn_level, 
+            strides_per_fpn_level,
+            device=feats_per_fpn_level["p3"].device
+        )
+        
+        # 2.3 在中心点上撒网，生成真实的 Anchor 坐标 (x1, y1, x2, y2)
+        anchors_per_fpn_level = generate_fpn_anchors(
+            locations_per_fpn_level,
+            strides_per_fpn_level,
+            stride_scale=self.anchor_stride_scale,
+            aspect_ratios=self.anchor_aspect_ratios
+        )
         ######################################################################
         #                           END OF YOUR CODE                         #
         ######################################################################
@@ -544,7 +715,16 @@ class RPN(nn.Module):
         # giving matching GT boxes to anchor boxes). Fill this list:
         matched_gt_boxes = []
         # Replace "pass" statement with your code
-        pass
+        
+        # 遍历每一张图片
+        for i in range(num_images):
+            # 获取当前这张图匹配好的 GT boxes (包含前景、背景和忽略样本的标记)
+            matched_per_image = rcnn_match_anchors_to_gt(
+                anchor_boxes, 
+                gt_boxes[i], 
+                self.anchor_iou_thresholds
+            )
+            matched_gt_boxes.append(matched_per_image)
         ######################################################################
         #                           END OF YOUR CODE                         #
         ######################################################################
@@ -585,7 +765,44 @@ class RPN(nn.Module):
             # Feel free to delete this line: (but keep variable names same)
             loss_obj, loss_box = None, None
             # Replace "pass" statement with your code
-            pass
+            import torch.nn.functional as F
+
+            # Step 1: 抽样 (Sampling)
+            # 计算总共需要抽样的数量 (每张图的样本数 * 图片总数)
+            total_samples = self.batch_size_per_image * num_images
+            # 使用框架提供的函数进行正负样本平衡抽样，返回选中框的索引
+            fg_idx, bg_idx = sample_rpn_training(matched_gt_boxes, total_samples, fg_fraction=0.5)
+            sample_idxs = torch.cat([fg_idx, bg_idx], dim=0)
+            # 根据抽样索引，提取对应的网络预测值、Anchor坐标和匹配好的GT真值
+            sampled_pred_obj = pred_obj_logits[sample_idxs]
+            sampled_pred_box = pred_boxreg_deltas[sample_idxs]
+            sampled_anchors = anchor_boxes[sample_idxs]
+            sampled_gt_boxes = matched_gt_boxes[sample_idxs]
+
+            # Step 2: 制作框回归的“标准答案” (Targets)
+            # 利用之前写的函数，计算从 sampled_anchors 到 sampled_gt_boxes 的理论 Deltas
+            target_deltas = rcnn_get_deltas_from_anchors(sampled_anchors, sampled_gt_boxes)
+
+            # Step 3: 计算 Loss
+            # 区分前景和背景：在 matched_gt_boxes 中，背景框的类别 (第5列) 被设为了 -1
+            # 而 sample_rpn_training 不会返回中立样本(-1e8)，所以只要 >= 0 就是前景
+            fg_mask = sampled_gt_boxes[:, 4] >= 0
+
+            # 3.1 Objectness Loss (分类损失)
+            # 前景 target 为 1.0，背景 target 为 0.0
+            gt_obj = fg_mask.float()
+            # 注意 reduction="none" 保证每个样本单独算损失，形状保持为 [total_samples]
+            loss_obj = F.binary_cross_entropy_with_logits(
+                sampled_pred_obj, gt_obj, reduction="none"
+            )
+
+            # 3.2 Box Regression Loss (回归损失)
+            # L1 Loss：绝对值误差。因为预测的是 dx, dy, dw, dh，所以是四维的，在维度1求和
+            loss_box = F.l1_loss(sampled_pred_box, target_deltas, reduction="none")
+            loss_box = loss_box.sum(dim=1) 
+            
+            # 【极其关键的一步】：非前景 (背景) 的框不需要做位置回归，将其损失强行置为 0
+            loss_box[~fg_mask] = 0.0
             ##################################################################
             #                         END OF YOUR CODE                       #
             ##################################################################
@@ -653,7 +870,42 @@ class RPN(nn.Module):
                 # different shapes, you need to make some intermediate views.
                 ##############################################################
                 # Replace "pass" statement with your code
-                pass
+                # 获取当前这张图片、在当前 FPN 层的 objectness 和 deltas
+                # 形状分别为 (HWA,) 和 (HWA, 4)
+                logits_per_img = level_obj_logits[_batch_idx]
+                deltas_per_img = level_boxreg_deltas[_batch_idx]
+                
+                # --- Step 1: 变形与裁剪 ---
+                # 利用之前的逆向解码函数，算出预测框的实际坐标
+                proposals = rcnn_apply_deltas_to_anchors(deltas_per_img, level_anchors)
+                
+                # 限制坐标不要跑出图片的宽 (img_w) 和高 (img_h)
+                img_w, img_h = image_size
+                proposals[:, 0] = proposals[:, 0].clamp(min=0, max=img_w)
+                proposals[:, 1] = proposals[:, 1].clamp(min=0, max=img_h)
+                proposals[:, 2] = proposals[:, 2].clamp(min=0, max=img_w)
+                proposals[:, 3] = proposals[:, 3].clamp(min=0, max=img_h)
+                
+                # --- Step 2: Pre-NMS Top-K 预筛选 ---
+                # 确定我们要保留多少个。如果这一层的总框数还不到 pre_nms_topk，就取总框数
+                num_pre_nms = min(self.pre_nms_topk, logits_per_img.shape[0])
+                
+                # torch.topk 极其方便，直接返回最大的 values 和对应的 indices (默认降序)
+                topk_logits, topk_idx = torch.topk(logits_per_img, num_pre_nms)
+                topk_proposals = proposals[topk_idx]
+                
+                # --- Step 3: NMS 与 Post-NMS Top-K 后筛选 ---
+                # 使用 PyTorch 官方的 NMS (C++ 层面优化，比纯 Python 快得多)
+                keep_idx = torchvision.ops.nms(
+                    topk_proposals, topk_logits, self.nms_thresh
+                )
+                
+                # NMS 返回的是保留下来的框的索引。我们再切片保留前 post_nms_topk 个
+                keep_idx = keep_idx[:self.post_nms_topk]
+                final_proposals = topk_proposals[keep_idx]
+                
+                # 把这张图片、这个 FPN 层的最终高价值 Proposal 加入列表
+                level_proposals_per_image.append(final_proposals)
                 ##############################################################
                 #                        END OF YOUR CODE                    #
                 ##############################################################
@@ -719,7 +971,25 @@ class FasterRCNN(nn.Module):
         # `FCOSPredictionNetwork` for this code block.
         cls_pred = []
         # Replace "pass" statement with your code
-        pass
+        cls_pred = []
+        
+        # 在这门课（EECS 498/598）的标准设定中，FPN 输出的特征通道数通常固定为 256。
+        # 如果你的代码架构中 backbone 暴露了该属性，也可以替换为 self.backbone.out_channels
+        in_channels = self.backbone.out_channels
+        
+        # 1. 遍历 stem_channels 构建卷积层
+        for curr_channels in stem_channels:
+            conv = nn.Conv2d(in_channels, curr_channels, kernel_size=3, stride=1, padding=1)
+            
+            # 必须的初始化：权重正态分布，偏置为 0
+            nn.init.normal_(conv.weight, mean=0.0, std=0.01)
+            nn.init.constant_(conv.bias, 0.0)
+            
+            cls_pred.append(conv)
+            cls_pred.append(nn.ReLU())
+            
+            # 当前层的输出通道，作为下一层的输入通道
+            in_channels = curr_channels
 
         ######################################################################
         # TODO: Add an `nn.Flatten` module to `cls_pred`, followed by a linear
@@ -728,7 +998,21 @@ class FasterRCNN(nn.Module):
         # shape from `nn.Flatten` layer.
         ######################################################################
         # Replace "pass" statement with your code
-        pass
+        # 2. 展平特征图
+        cls_pred.append(nn.Flatten())
+        
+        # 3. 计算全连接层的输入维度
+        # 经过 stride=1, padding=1 的卷积后，特征图长宽保持不变，仍为 roi_size (默认 7x7)
+        # 所以展平后的向量长度 = 最后的通道数 * 长 * 宽
+        flatten_dim = in_channels * self.roi_size[0] * self.roi_size[1]
+        
+        # 4. 构建全连接层并初始化
+        # 输出维度为 num_classes (前景类别) + 1 (背景类别)
+        linear = nn.Linear(flatten_dim, self.num_classes + 1)
+        nn.init.normal_(linear.weight, mean=0.0, std=0.01)
+        nn.init.constant_(linear.bias, 0.0)
+        
+        cls_pred.append(linear)
         ######################################################################
         #                           END OF YOUR CODE                         #
         ######################################################################
@@ -781,7 +1065,17 @@ class FasterRCNN(nn.Module):
             level_stride = self.backbone.fpn_strides[level_name]
 
             # Replace "pass" statement with your code
-            pass
+            spatial_scale = 1.0 / level_stride
+            
+            # 调用 PyTorch 官方的 roi_align
+            # 注意：level_props 已经是一个 List[Tensor] 了，正好符合官方 API 的要求
+            roi_feats = torchvision.ops.roi_align(
+                input=level_feats,
+                boxes=level_props,
+                output_size=self.roi_size,
+                spatial_scale=spatial_scale,
+                aligned=True
+            )
             ##################################################################
             #                         END OF YOUR CODE                       #
             ##################################################################
@@ -815,20 +1109,22 @@ class FasterRCNN(nn.Module):
         # such that IoU > 0.5 is foreground, otherwise background.
         # There are no neutral proposals in second-stage.
         ######################################################################
-        matched_gt_boxes = []
-        for _idx in range(len(gt_boxes)):
-            # Get proposals per image from this dictionary of list of tensors.
-            proposals_per_fpn_level_per_image = {
-                level_name: prop[_idx]
-                for level_name, prop in output_dict["proposals"].items()
-            }
-            proposals_per_image = self._cat_across_fpn_levels(
-                proposals_per_fpn_level_per_image, dim=0
-            )
-            gt_boxes_per_image = gt_boxes[_idx]
-            # Replace "pass" statement with your code
-            pass
-        ######################################################################
+        matched_gt_boxes = [] 
+        
+        for level_name in feats_per_fpn_level.keys(): # 默认顺序: p3, p4, p5
+            for _idx in range(len(gt_boxes)):         # 遍历 Batch 中的每一张图
+                # 提取当前图、当前 FPN 层的 proposals
+                level_props = output_dict["proposals"][level_name][_idx]
+                gt_boxes_per_image = gt_boxes[_idx]
+                
+                # 对当前层的 proposals 进行 GT 匹配
+                matched_gt = rcnn_match_anchors_to_gt(
+                    level_props, 
+                    gt_boxes_per_image, 
+                    iou_thresholds=(0.5, 0.5)
+                )
+                matched_gt_boxes.append(matched_gt)
+       ######################################################################
         #                           END OF YOUR CODE                         #
         ######################################################################
 
@@ -855,7 +1151,30 @@ class FasterRCNN(nn.Module):
         # Feel free to delete this line: (but keep variable names same)
         loss_cls = None
         # Replace "pass" statement with your code
-        pass
+        import torch.nn.functional as F
+        
+        # 1. 抽样：总共抽取 batch_size_per_image * num_images 个样本，前景占比 25% (0.25)
+        total_samples = self.batch_size_per_image * num_images
+        fg_idx, bg_idx = sample_rpn_training(
+            matched_gt_boxes, total_samples, fg_fraction=0.25
+        )
+        
+        # 将前景和背景的索引拼接到一起
+        sample_idxs = torch.cat([fg_idx, bg_idx], dim=0)
+        
+        # 2. 提取抽样得到的数据
+        sampled_logits = pred_cls_logits[sample_idxs]
+        sampled_gt_boxes = matched_gt_boxes[sample_idxs]
+        
+        # 提取真实类别标签 (第5列，索引为4)
+        gt_classes = sampled_gt_boxes[:, 4]
+        
+        # 【关键移位】：让背景类 (-1) 变成 0，让前景类别 (0~19) 变成 (1~20)
+        target_classes = gt_classes + 1
+        
+        # 3. 计算交叉熵损失
+        # 注意 PyTorch 的 cross_entropy 要求 Target 为 int64 (long) 数据类型
+        loss_cls = F.cross_entropy(sampled_logits, target_classes.long())
         ######################################################################
         #                           END OF YOUR CODE                         #
         ######################################################################
@@ -926,7 +1245,30 @@ class FasterRCNN(nn.Module):
         ######################################################################
         pred_scores, pred_classes = None, None
         # Replace "pass" statement with your code
-        pass
+        import torch.nn.functional as F
+
+        # 1. 将预测的 Logits 转换为概率 (概率总和为 1)
+        # pred_cls_logits 的形状是 (N, C + 1)
+        probs = F.softmax(pred_cls_logits, dim=-1)
+
+        # 取出每个框概率最大的那个类别，以及对应的概率分数
+        # pred_scores: (N,) 对应的最高分数
+        # pred_classes: (N,) 对应的类别索引
+        pred_scores, pred_classes = torch.max(probs, dim=-1)
+
+        # 2. 设置过滤掩码 (Mask)：
+        # 条件 A: 类别必须大于 0 (因为我们在训练时给所有类别加了 1，0 成了背景)
+        # 条件 B: 置信度分数必须大于我们设定的阈值 test_score_thresh
+        keep_mask = (pred_classes > 0) & (pred_scores > test_score_thresh)
+
+        # 利用掩码过滤掉不合格的框和分数
+        pred_boxes = pred_boxes[keep_mask]
+        pred_scores = pred_scores[keep_mask]
+        pred_classes = pred_classes[keep_mask]
+
+        # 3. 类别 ID 复位：
+        # 将保留下来的前景类别 (1~20) 整体减 1，恢复为外部评测接口所期望的 VOC 标签 (0~19)
+        pred_classes = pred_classes - 1
         ######################################################################
         #                            END OF YOUR CODE                        #
         ######################################################################
