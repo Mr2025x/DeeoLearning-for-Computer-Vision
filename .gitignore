@@ -1,13 +1,12 @@
 env/
-# 忽略整个仓库（包含所有子文件夹）中的 Python 缓存
-__pycache__/
-.ipynb_checkpoints/
+# 1. 忽略当前文件夹下的所有内容（一刀切）
+*
 
-# 忽略整个仓库中的压缩包（拦截那个 166MB 的大文件）
-*.tar.gz
+# 2. 保留 .gitignore 文件自身（否则它也会被忽略，无法传到 GitHub）
+!.gitignore
 
-# 忽略整个仓库中的模型权重文件
-*.pth
+# 3. 放行所有的 Python 脚本
+!*.py
 
-# 忽略特定的数据集文件夹（无论它在哪个层级）
-cifar-10-batches-py/
+# 4. 放行所有的 Jupyter Notebook 文件
+!*.ipynb

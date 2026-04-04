@@ -83,8 +83,16 @@ class DetectorBackboneWithFPN(nn.Module):
         # Add THREE lateral 1x1 conv and THREE output 3x3 conv layers.
         self.fpn_params = nn.ModuleDict()
 
-        # Replace "pass" statement with your code
-        pass
+        for level_name, feature_shape in dummy_out_shapes:
+            in_channels = feature_shape[1]
+            # 这里统一命名为 c3_lateral, c3_output 等
+            self.fpn_params[f"{level_name}_lateral"] = nn.Conv2d(
+                in_channels, out_channels, kernel_size=1, stride=1, padding=0
+            )
+
+            self.fpn_params[f"{level_name}_output"] = nn.Conv2d(
+                out_channels, out_channels, kernel_size=3, stride=1, padding=1
+            )
         ######################################################################
         #                            END OF YOUR CODE                        #
         ######################################################################
@@ -109,9 +117,18 @@ class DetectorBackboneWithFPN(nn.Module):
         # (c3, c4, c5) and FPN conv layers created above.                    #
         # HINT: Use `F.interpolate` to upsample FPN features.                #
         ######################################################################
+        m5 = self.fpn_params["c5_lateral"](backbone_feats["c5"])
+        m4 = self.fpn_params["c4_lateral"](backbone_feats["c4"])
+        m3 = self.fpn_params["c3_lateral"](backbone_feats["c3"])
 
-        # Replace "pass" statement with your code
-        pass
+        # 2. 自顶向下融合
+        m4 = m4 + F.interpolate(m5, scale_factor=2, mode="nearest")
+        m3 = m3 + F.interpolate(m4, scale_factor=2, mode="nearest")
+
+        # 3. 输出平滑：严格使用上面定义的 c5_output 等名字
+        fpn_feats["p5"] = self.fpn_params["c5_output"](m5)
+        fpn_feats["p4"] = self.fpn_params["c4_output"](m4)
+        fpn_feats["p3"] = self.fpn_params["c3_output"](m3)
         ######################################################################
         #                            END OF YOUR CODE                        #
         ######################################################################
@@ -157,7 +174,28 @@ def get_fpn_location_coords(
         # TODO: Implement logic to get location co-ordinates below.          #
         ######################################################################
         # Replace "pass" statement with your code
-        pass
+        # 1. 解析当前特征图的高度 H 和宽度 W
+        # feat_shape 的格式是 (B, C, H, W)
+        H, W = feat_shape[2], feat_shape[3]
+
+        # 2. 生成特征图上的 x 和 y 坐标轴序列
+        # torch.arange 生成 [0, 1, 2, ..., W-1] 和 [0, 1, 2, ..., H-1]
+        # 按照公式：加上 0.5 并乘以 stride
+        shifts_x = (torch.arange(W, dtype=dtype, device=device) + 0.5) * level_stride
+        shifts_y = (torch.arange(H, dtype=dtype, device=device) + 0.5) * level_stride
+
+        # 3. 使用 meshgrid 生成二维网格坐标
+        # indexing="ij" 确保输出的 y 和 x 网格形状均为 (H, W)
+        shift_y, shift_x = torch.meshgrid(shifts_y, shifts_x, indexing="ij")
+
+        # 4. 将网格展平，并将 x 和 y 组合在一起
+        # flatten() 会把 (H, W) 变成一维的 (H * W)
+        # torch.stack 沿着最后的维度把 x 和 y 拼起来，变成形状为 (H * W, 2) 的张量
+        # 注意顺序：通常目标检测中坐标习惯用 (x, y) 格式，而不是 (y, x)
+        shifts = torch.stack([shift_x.flatten(), shift_y.flatten()], dim=-1)
+
+        # 存入字典
+        location_coords[level_name] = shifts
         ######################################################################
         #                             END OF YOUR CODE                       #
         ######################################################################
@@ -196,7 +234,61 @@ def nms(boxes: torch.Tensor, scores: torch.Tensor, iou_threshold: float = 0.5):
     # github.com/pytorch/vision/blob/main/torchvision/csrc/ops/cpu/nms_kernel.cpp
     #############################################################################
     # Replace "pass" statement with your code
-    pass
+    # 1. 提取所有框的坐标 (左上角 x1, y1; 右下角 x2, y2)
+    x1 = boxes[:, 0]
+    y1 = boxes[:, 1]
+    x2 = boxes[:, 2]
+    y2 = boxes[:, 3]
+
+    # 2. 计算每一个框的面积
+    areas = (x2 - x1) * (y2 - y1)
+
+    # 3. 按照得分从高到低对索引进行排序
+    # scores.sort() 返回两个值：排序后的结果，以及对应的原始索引 (order)
+    _, order = scores.sort(0, descending=True)
+
+    keep_boxes = [] # 用于存放最终保留下来的框的索引
+
+    # 只要 order 里面还有框，就一直循环
+    while order.numel() > 0:
+        # 如果只剩最后一个框了，直接保留并结束循环
+        if order.numel() == 1:
+            i = order[0].item()
+            keep_boxes.append(i)
+            break
+
+        # 4. 每次循环挑出最高分的框索引 i，加入保留名单
+        i = order[0].item()
+        keep_boxes.append(i)
+
+        # 5. 计算当前最高分框 (i) 与剩余所有框 (order[1:]) 的交集坐标
+        # 使用 torch.max 和 torch.min 进行逐元素比较 (向量化计算)
+        xx1 = torch.max(x1[i], x1[order[1:]])
+        yy1 = torch.max(y1[i], y1[order[1:]])
+        xx2 = torch.min(x2[i], x2[order[1:]])
+        yy2 = torch.min(y2[i], y2[order[1:]])
+
+        # 6. 计算交集的宽 (w) 和 高 (h)
+        # 用 clamp(..., min=0) 保证如果两个框不相交，宽和高就是 0，而不是负数
+        w = torch.clamp(xx2 - xx1, min=0.0)
+        h = torch.clamp(yy2 - yy1, min=0.0)
+        inter = w * h
+
+        # 7. 计算 IoU
+        # 交集面积 / (框 i 的面积 + 剩余框的面积 - 交集面积)
+        iou = inter / (areas[i] + areas[order[1:]] - inter)
+
+        # 8. 过滤掉 IoU > iou_threshold 的框
+        # 找出那些 IoU <= 阈值的框的索引 (也就是可以幸存下来的框)
+        inds = torch.where(iou <= iou_threshold)[0]
+
+        # 9. 更新 order，只保留幸存下来的框，进入下一轮循环
+        # 注意：因为我们刚才计算 IoU 时没有包含 i 本身，用的是 order[1:]
+        # 所以这里的 inds 对应的其实是 order[1:] 里的位置，我们需要加 1 来对齐原始的 order
+        order = order[inds + 1]
+
+    # 将 Python list 转换为要求返回的 PyTorch Tensor
+    keep = torch.tensor(keep_boxes, dtype=torch.long, device=boxes.device)
     #############################################################################
     #                              END OF YOUR CODE                             #
     #############################################################################

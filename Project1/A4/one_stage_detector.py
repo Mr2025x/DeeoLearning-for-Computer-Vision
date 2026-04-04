@@ -8,14 +8,10 @@ from torch import nn
 from torch.nn import functional as F
 from torch.utils.data._utils.collate import default_collate
 from torchvision.ops import sigmoid_focal_loss
-
 # Short hand type notation:
 TensorDict = Dict[str, torch.Tensor]
-
-
 def hello_one_stage_detector():
     print("Hello from one_stage_detector.py!")
-
 
 class FCOSPredictionNetwork(nn.Module):
     """
@@ -57,11 +53,30 @@ class FCOSPredictionNetwork(nn.Module):
         # at every location in feature map, we shouldn't "lose" any locations.
         ######################################################################
         # Fill these.
+        self.num_classes = num_classes
         stem_cls = []
         stem_box = []
         # Replace "pass" statement with your code
-        pass
-
+        prev_channels = in_channels
+        for curr_channels in stem_channels:
+            # --- 构建分类 Stem ---
+            conv_cls = nn.Conv2d(prev_channels, curr_channels, kernel_size=3, stride=1, padding=1)
+            # 权重和偏置初始化
+            nn.init.normal_(conv_cls.weight, mean=0, std=0.01)
+            nn.init.constant_(conv_cls.bias, 0)
+            stem_cls.append(conv_cls)
+            stem_cls.append(nn.ReLU())
+            
+            # --- 构建边界框 Stem ---
+            conv_box = nn.Conv2d(prev_channels, curr_channels, kernel_size=3, stride=1, padding=1)
+            # 权重和偏置初始化
+            nn.init.normal_(conv_box.weight, mean=0, std=0.01)
+            nn.init.constant_(conv_box.bias, 0)
+            stem_box.append(conv_box)
+            stem_box.append(nn.ReLU())
+            
+            # 更新 prev_channels 供下一层使用
+            prev_channels = curr_channels
         # Wrap the layers defined by student into a `nn.Sequential` module:
         self.stem_cls = nn.Sequential(*stem_cls)
         self.stem_box = nn.Sequential(*stem_box)
@@ -88,7 +103,20 @@ class FCOSPredictionNetwork(nn.Module):
         self.pred_ctr = None  # Centerness conv
 
         # Replace "pass" statement with your code
-        pass
+        # 这里的输入通道数是 stem_channels 的最后一个元素
+        final_channels = stem_channels[-1]
+        
+        # 1. 类别预测：输出通道数为 num_classes
+        self.pred_cls = nn.Conv2d(final_channels, num_classes, kernel_size=3, stride=1, padding=1)
+        # 2. 边界框预测：输出通道数为 4 (左L, 上T, 右R, 下B)
+        self.pred_box = nn.Conv2d(final_channels, 4, kernel_size=3, stride=1, padding=1)
+        # 3. 中心度预测：输出通道数为 1
+        self.pred_ctr = nn.Conv2d(final_channels, 1, kernel_size=3, stride=1, padding=1)
+
+        # 同样需要对这三个预测层进行初始化
+        for module in [self.pred_cls, self.pred_box, self.pred_ctr]:
+            nn.init.normal_(module.weight, mean=0, std=0.01)
+            nn.init.constant_(module.bias, 0)
         ######################################################################
         #                           END OF YOUR CODE                         #
         ######################################################################
@@ -135,13 +163,29 @@ class FCOSPredictionNetwork(nn.Module):
         centerness_logits = {}
 
         # Replace "pass" statement with your code
-        pass
+        for level_name, feat in feats_per_fpn_level.items():
+            B = feat.shape[0]  # 获取 Batch Size
+            
+            # 1. 将特征送入各自的 Stem
+            cls_stem_out = self.stem_cls(feat)
+            box_stem_out = self.stem_box(feat)
+            
+            # 2. 获得最终预测 (Shape: [Batch, Channels, H, W])
+            cls_out = self.pred_cls(cls_stem_out)
+            box_out = self.pred_box(box_stem_out)
+            ctr_out = self.pred_ctr(box_stem_out) # 注意：中心度使用 box_stem_out
+            
+            # 3. 调整形状
+            # permute(0, 2, 3, 1) 将形状变为 [Batch, H, W, Channels]
+            # reshape(B, -1, C) 将 H 和 W 展平，形状最终变为 [Batch, H*W, Channels]
+            class_logits[level_name] = cls_out.permute(0, 2, 3, 1).reshape(B, -1, self.num_classes)
+            boxreg_deltas[level_name] = box_out.permute(0, 2, 3, 1).reshape(B, -1, 4)
+            centerness_logits[level_name] = ctr_out.permute(0, 2, 3, 1).reshape(B, -1, 1)
         ######################################################################
         #                           END OF YOUR CODE                         #
         ######################################################################
 
         return [class_logits, boxreg_deltas, centerness_logits]
-
 
 @torch.no_grad()
 def fcos_match_locations_to_gt(
@@ -268,9 +312,33 @@ def fcos_get_deltas_from_locations(
     # Set this to Tensor of shape (N, 4) giving deltas (left, top, right, bottom)
     # from the locations to GT box edges, normalized by FPN stride.
     deltas = None
+    x = locations[:, 0]
+    y = locations[:, 1]
 
+    # 2. 提取真实框(GT boxes)的坐标 (N,)
+    # 这里只取前4列，因此无论 GT 形状是 (N, 4) 还是带类别的 (N, 5) 都能兼容
+    x_min = gt_boxes[:, 0]
+    y_min = gt_boxes[:, 1]
+    x_max = gt_boxes[:, 2]
+    y_max = gt_boxes[:, 3]
+
+    # 3. 计算 l, t, r, b 距离
+    l = x - x_min
+    t = y - y_min
+    r = x_max - x
+    b = y_max - y
+
+    # 4. 组合成 (N, 4) 的张量，并进行步长归一化
+    deltas = torch.stack([l, t, r, b], dim=-1) / stride
+
+    # 5. 处理背景框
+    # 题目说明：背景框的值全为 -1。因此我们可以通过判断 x_min == -1 来找到背景
+    bg_mask = (x_min == -1)
+    
+    # 将背景对应的 deltas 设置为 (-1, -1, -1, -1)
+    deltas[bg_mask] = -1.0
     # Replace "pass" statement with your code
-    pass
+    
     ##########################################################################
     #                             END OF YOUR CODE                           #
     ##########################################################################
@@ -312,7 +380,30 @@ def fcos_apply_deltas_to_locations(
     # box. Make sure to clip them to zero.                                   #
     ##########################################################################
     # Replace "pass" statement with your code
-    pass
+    # 1. 截断负数：将所有小于 0 的预测值限制为 0
+    deltas = torch.clamp(deltas, min=0.0)
+    
+    # 2. 反归一化：乘以步长，恢复到原图尺度的绝对像素距离
+    deltas = deltas * stride
+    
+    # 3. 提取特征点中心坐标 (x, y)
+    x = locations[:, 0]
+    y = locations[:, 1]
+    
+    # 4. 提取预测的四个方向的距离 l, t, r, b
+    l = deltas[:, 0]
+    t = deltas[:, 1]
+    r = deltas[:, 2]
+    b = deltas[:, 3]
+    
+    # 5. 根据公式计算绝对边界框坐标 (x1, y1, x2, y2)
+    x1 = x - l
+    y1 = y - t
+    x2 = x + r
+    y2 = y + b
+    
+    # 6. 将四个一维张量在最后一个维度上拼接起来，形状变为 (N, 4)
+    output_boxes = torch.stack([x1, y1, x2, y2], dim=-1)
     ##########################################################################
     #                             END OF YOUR CODE                           #
     ##########################################################################
@@ -342,7 +433,30 @@ def fcos_make_centerness_targets(deltas: torch.Tensor):
     ##########################################################################
     centerness = None
     # Replace "pass" statement with your code
-    pass
+    # 1. 提取 l, t, r, b
+    l = deltas[:, 0]
+    t = deltas[:, 1]
+    r = deltas[:, 2]
+    b = deltas[:, 3]
+
+    # 2. 找到背景掩码 (只要任意一个是 -1，就是背景)
+    bg_mask = (l == -1)
+
+    # 3. 为了防止在计算公式时发生分母为 0 或对负数开根号的数学异常，
+    # 我们取出最大值，并通过 clamp 保证分母至少是一个极小的正数 (比如 1e-6)
+    # 对于背景的 -1，此时计算出的结果虽然是错的，但没关系，我们下一步会将其覆盖
+    lr_min = torch.min(l, r)
+    lr_max = torch.clamp(torch.max(l, r), min=1e-6)
+    
+    tb_min = torch.min(t, b)
+    tb_max = torch.clamp(torch.max(t, b), min=1e-6)
+
+    # 4. 根据论文公式计算 Centerness
+    # 由于背景点被 clamp 成了正数，这里不会触发 sqrt 的 nan 报错
+    centerness = torch.sqrt((lr_min / lr_max) * (tb_min / tb_max))
+
+    # 5. 处理背景：将之前标记为背景的位置，强制覆盖为 -1.0
+    centerness[bg_mask] = -1.0
     ##########################################################################
     #                             END OF YOUR CODE                           #
     ##########################################################################
@@ -372,7 +486,12 @@ class FCOS(nn.Module):
         self.backbone = None
         self.pred_net = None
         # Replace "pass" statement with your code
-        pass
+        self.backbone = DetectorBackboneWithFPN(out_channels=fpn_channels)
+        self.pred_net = FCOSPredictionNetwork(
+            num_classes=num_classes,
+            in_channels=fpn_channels,
+            stem_channels=stem_channels
+        )
         ######################################################################
         #                           END OF YOUR CODE                         #
         ######################################################################
@@ -416,7 +535,10 @@ class FCOS(nn.Module):
         # Feel free to delete this line: (but keep variable names same)
         pred_cls_logits, pred_boxreg_deltas, pred_ctr_logits = None, None, None
         # Replace "pass" statement with your code
-        pass
+        fpn_features = self.backbone(images)
+        
+        # 2. 特征图送入预测头，得到三张“答卷”（分类、距离、中心度）
+        pred_cls_logits, pred_boxreg_deltas, pred_ctr_logits = self.pred_net(fpn_features)
 
         ######################################################################
         # TODO: Get absolute co-ordinates `(xc, yc)` for every location in
@@ -426,9 +548,20 @@ class FCOS(nn.Module):
         # call the functions properly.
         ######################################################################
         # Feel free to delete this line: (but keep variable names same)
-        locations_per_fpn_level = None
+   #     locations_per_fpn_level = None
         # Replace "pass" statement with your code
-        pass
+        shape_per_fpn_level = {
+            level_name: feat.shape 
+            for level_name, feat in fpn_features.items()
+        }
+
+        # 2. 一次性调用函数（无需自己写循环）
+        locations_per_fpn_level = get_fpn_location_coords(
+            shape_per_fpn_level=shape_per_fpn_level,
+            strides_per_fpn_level=self.backbone.fpn_strides,
+            dtype=images.dtype,
+            device=images.device
+        )
         ######################################################################
         #                           END OF YOUR CODE                         #
         ######################################################################
@@ -454,13 +587,27 @@ class FCOS(nn.Module):
         # boxes for locations per FPN level, per image. Fill this list:
         matched_gt_boxes = []
         # Replace "pass" statement with your code
-        pass
+        for i in range(images.shape[0]):
+            # 为第 i 张图片匹配 GT 框
+            matched_boxes_dict = fcos_match_locations_to_gt(
+                locations_per_fpn_level, self.backbone.fpn_strides, gt_boxes[i]
+            )
+            matched_gt_boxes.append(matched_boxes_dict)
 
         # Calculate GT deltas for these matched boxes. Similar structure
         # as `matched_gt_boxes` above. Fill this list:
         matched_gt_deltas = []
         # Replace "pass" statement with your code
-        pass
+        for i in range(images.shape[0]):
+            matched_deltas_dict = {}
+            # 遍历 FPN 的每一个层级 (p3, p4, p5)
+            for level_name, locations in locations_per_fpn_level.items():
+                stride = self.backbone.fpn_strides[level_name]
+
+                matched_deltas_dict[level_name] = fcos_get_deltas_from_locations(
+                    locations, matched_gt_boxes[i][level_name], stride
+                )
+            matched_gt_deltas.append(matched_deltas_dict)
         ######################################################################
         #                           END OF YOUR CODE                         #
         ######################################################################
@@ -493,7 +640,46 @@ class FCOS(nn.Module):
         loss_cls, loss_box, loss_ctr = None, None, None
 
         # Replace "pass" statement with your code
-        pass
+        # 取出 GT 的类别标签。背景标签为 -1
+        gt_classes = matched_gt_boxes[:, :, 4]
+        fg_mask = (gt_classes != -1) # 前景掩码（只保留有物体的像素点）
+
+        # -----------------------------------------------------------
+        # 1. Classification Loss (分类损失)
+        # 首先需要把 gt_classes 变成 One-hot 编码格式
+        gt_classes_one_hot = torch.zeros_like(pred_cls_logits)
+        gt_classes_one_hot[fg_mask] = F.one_hot(
+            gt_classes[fg_mask].long(), num_classes=self.num_classes
+        ).float()
+
+        # 直接调用文件开头导入好的 sigmoid_focal_loss
+        loss_cls = sigmoid_focal_loss(
+            inputs=pred_cls_logits, 
+            targets=gt_classes_one_hot, 
+            alpha=0.25, gamma=2.0, reduction="none"
+        )
+
+        # -----------------------------------------------------------
+        # 2. Box Regression Loss (边界框回归损失)
+        # 直接使用全局的 F.l1_loss
+        loss_box = F.l1_loss(pred_boxreg_deltas, matched_gt_deltas, reduction="none")
+        loss_box[~fg_mask] = 0.0 # 背景位置的回归损失清零
+
+        # -----------------------------------------------------------
+        # 3. Centerness Loss (中心度损失)
+        # 调用当前文件上方写好的 fcos_make_centerness_targets 函数
+        gt_centerness = fcos_make_centerness_targets(
+            matched_gt_deltas.reshape(-1, 4)
+        ).view_as(pred_ctr_logits.squeeze(-1))
+
+        # 直接使用全局的 F.binary_cross_entropy_with_logits
+        loss_ctr = F.binary_cross_entropy_with_logits(
+            pred_ctr_logits.squeeze(-1), gt_centerness, reduction="none"
+        )
+        loss_ctr[~fg_mask] = 0.0 # 背景位置的中心度损失清零
+
+
+        
         ######################################################################
         #                            END OF YOUR CODE                        #
         ######################################################################
@@ -589,19 +775,32 @@ class FCOS(nn.Module):
             )
             # Step 1:
             # Replace "pass" statement with your code
-            pass
-
+            level_pred_scores, level_pred_classes = level_pred_scores.max(dim=1)
             # Step 2:
             # Replace "pass" statement with your code
-            pass
+            keep_idx = level_pred_scores > test_score_thresh
+            
+            level_pred_scores = level_pred_scores[keep_idx]
+            level_pred_classes = level_pred_classes[keep_idx]
+            level_deltas = level_deltas[keep_idx]
+            level_locations = level_locations[keep_idx]
 
             # Step 3:
             # Replace "pass" statement with your code
-            pass
+            stride = self.backbone.fpn_strides[level_name]
+
+            level_pred_boxes = fcos_apply_deltas_to_locations(
+                level_deltas, level_locations, stride
+            )
 
             # Step 4: Use `images` to get (height, width) for clipping.
             # Replace "pass" statement with your code
-            pass
+            H, W = images.shape[2], images.shape[3]
+
+            level_pred_boxes[:, 0].clamp_(min=0.0, max=W)
+            level_pred_boxes[:, 1].clamp_(min=0.0, max=H)
+            level_pred_boxes[:, 2].clamp_(min=0.0, max=W)
+            level_pred_boxes[:, 3].clamp_(min=0.0, max=H)
             ##################################################################
             #                          END OF YOUR CODE                      #
             ##################################################################
