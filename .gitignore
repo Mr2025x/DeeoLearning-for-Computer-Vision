@@ -10,3 +10,6 @@ env/
 
 # 4. 放行所有的 Jupyter Notebook 文件
 !*.ipynb
+
+# 5. 放行所有的 Markdown 文件
+!*.md

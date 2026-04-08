@@ -33,7 +33,8 @@ def generate_token_dict(vocab):
     # elements in between as consequetive number.                                #
     ##############################################################################
     # Replace "pass" statement with your code
-    pass
+    for index, token in enumerate(vocab):
+        token_dict[token] = index
     ##############################################################################
     #               END OF YOUR CODE                                             #
     ##############################################################################
@@ -74,7 +75,19 @@ def prepocess_input_sequence(
     # appropriate value for the complete token.
     ##############################################################################
     # Replace "pass" statement with your code
-    pass
+    # 1. 按照空格将字符串切分成单词列表
+    words = input_str.split()
+    
+    # 2. 遍历每一个单词
+    for word in words:
+        # 如果是特殊字符 (例如 'BOS', 'add' 等)
+        if word in spc_tokens:
+            out.append(token_dict[word])
+        # 如果是数字 (例如 '0333')
+        else:
+            # 遍历该数字字符串的每一个字符 (即 '0', '3', '3', '3')
+            for char in word:
+                out.append(token_dict[char])
     ##############################################################################
     #               END OF YOUR CODE                                             #
     ##############################################################################
@@ -116,7 +129,21 @@ def scaled_dot_product_two_loop_single(
     # using weighted sum becomes an output to the Kth query vector                #
     ###############################################################################
     # Replace "pass" statement with your code
-    pass
+    for i in range(K_seq):
+        # Create a tensor to store the raw attention scores for the i-th query
+        scores = torch.zeros(K_seq, dtype=query.dtype, device=query.device)
+        
+        # Loop 2: Iterate over each key j to compute the dot product
+        for j in range(K_seq):
+            # Compute dot product and scale it
+            scores[j] = torch.dot(query[i], key[j]) / scale_factor
+            
+        # Apply softmax to the K_seq scaled weights
+        weights = F.softmax(scores, dim=0)
+        
+        # Compute the weighted sum of values using matrix-vector product
+        # weights shape: (K_seq,), value shape: (K_seq, M) -> output shape: (M,)
+        out[i] = torch.matmul(weights, value)
     ##############################################################################
     #               END OF YOUR CODE                                             #
     ##############################################################################
@@ -163,7 +190,23 @@ def scaled_dot_product_two_loop_batch(
     # Hint: look at torch.bmm                                                     #
     ###############################################################################
     # Replace "pass" statement with your code
-    pass
+    # Loop 1: Iterate over each sample in the batch (N)
+    for n in range(N):
+        # Loop 2: Iterate over each query in the sequence (K)
+        for i in range(K):
+            
+            # query[n, i] shape: (M,)
+            # key[n] shape: (K, M)
+            # torch.matmul performs dot product between the i-th query and all K keys
+            # resulting in 'scores' shape: (K,)
+            scores = torch.matmul(key[n], query[n, i]) / scale_factor
+            
+            # Apply softmax to get probability weights for the K keys
+            weights = F.softmax(scores, dim=0)
+            
+            # Compute weighted sum of values for the n-th sample
+            # weights shape: (K,), value[n] shape: (K, M) -> output shape: (M,)
+            out[n, i] = torch.matmul(weights, value[n])
     ##############################################################################
     #               END OF YOUR CODE                                             #
     ##############################################################################
@@ -218,16 +261,22 @@ def scaled_dot_product_no_loop_batch(
     # Hint: look at torch.bmm and torch.masked_fill                               #
     ###############################################################################
     # Replace "pass" statement with your code
-    pass
+    scores = torch.bmm(query, key.transpose(1, 2)) / scale_factor
     if mask is not None:
         ##########################################################################
         # TODO: Apply the mask to the weight matrix by assigning -1e9 to the     #
         # positions where the mask value is True, otherwise keep it as it is.    #
         ##########################################################################
         # Replace "pass" statement with your code
-        pass
+        scores = scores.masked_fill(mask, -1e9)
     # Replace "pass" statement with your code
-    pass
+    weights_softmax = F.softmax(scores, dim=-1)
+    
+    # 3. 再次使用批量矩阵乘法，用注意力权重对 Value 进行加权求和
+    # weights_softmax 形状: (N, K, K)
+    # value 形状: (N, K, M)
+    # y 形状: (N, K, M)
+    y = torch.bmm(weights_softmax, value)
     ##############################################################################
     #               END OF YOUR CODE                                             #
     ##############################################################################
@@ -268,7 +317,18 @@ class SelfAttention(nn.Module):
         # as given above. self.q, self.k, and self.v respectively.               #
         ##########################################################################
         # Replace "pass" statement with your code
-        pass
+        self.q = nn.Linear(dim_in, dim_q)
+        self.k = nn.Linear(dim_in, dim_q)
+        self.v = nn.Linear(dim_in, dim_v)
+
+        # 根据给定的公式计算均匀分布的边界 c
+        c_q = (6 / (dim_in + dim_q)) ** 0.5
+        c_v = (6 / (dim_in + dim_v)) ** 0.5
+
+        # 使用计算出的边界对三个线性层的权重进行均匀分布初始化
+        nn.init.uniform_(self.q.weight, -c_q, c_q)
+        nn.init.uniform_(self.k.weight, -c_q, c_q)
+        nn.init.uniform_(self.v.weight, -c_v, c_v)
         ##########################################################################
         #               END OF YOUR CODE                                         #
         ##########################################################################
@@ -303,7 +363,17 @@ class SelfAttention(nn.Module):
         # variable self.weights_softmax                                          #
         ##########################################################################
         # Replace "pass" statement with your code
-        pass
+        # 1. 经过线性层，得到真正的 Q, K, V 表示
+        # 虽然参数叫 query, key, value，但在自注意力机制中，传进来的其实都是同一个 X
+        transformed_q = self.q(query)
+        transformed_k = self.k(key)
+        transformed_v = self.v(value)
+
+        # 2. 调用我们之前写好的、无循环的纯张量注意力计算函数
+        # 传入 transformed_q, transformed_k, transformed_v 以及可能存在的 mask
+        y, self.weights_softmax = scaled_dot_product_no_loop_batch(
+            transformed_q, transformed_k, transformed_v, mask
+        )
         ##########################################################################
         #               END OF YOUR CODE                                         #
         ##########################################################################
@@ -354,7 +424,18 @@ class MultiHeadAttention(nn.Module):
         # SelfAttention.                                                         #
         ##########################################################################
         # Replace "pass" statement with your code
-        pass
+        self.heads = nn.ModuleList(
+            [SelfAttention(dim_in=dim_in, dim_q=dim_out, dim_v=dim_out) for _ in range(num_heads)]
+        )
+
+        # 2. 初始化一个线性映射层 (Linear layer)
+        # 拼接后的总维度是 num_heads * dim_out，我们需要把它映射回原始的 dim_in
+        concat_dim = num_heads * dim_out
+        self.proj = nn.Linear(concat_dim, dim_in)
+
+        # 使用与 SelfAttention 中相同的 Xavier 均匀分布初始化策略
+        c = (6 / (concat_dim + dim_in)) ** 0.5
+        nn.init.uniform_(self.proj.weight, -c, c)
         ##########################################################################
         #               END OF YOUR CODE                                         #
         ##########################################################################
@@ -398,7 +479,15 @@ class MultiHeadAttention(nn.Module):
         # nn.Linear mapping function defined in the initialization step.         #
         ##########################################################################
         # Replace "pass" statement with your code
-        pass
+        head_outputs = [head(query, key, value, mask) for head in self.heads]
+
+        # 2. 将所有头的输出在特征维度 (dim=-1) 上进行拼接
+        # 拼接后的形状变为 (N, K, num_heads * dim_out)
+        concat_out = torch.cat(head_outputs, dim=-1)
+
+        # 3. 通过最后的线性层，将维度映射回 dim_in
+        # 最终输出 y 的形状为 (N, K, dim_in)
+        y = self.proj(concat_out)
         ##########################################################################
         #               END OF YOUR CODE                                         #
         ##########################################################################
@@ -435,7 +524,10 @@ class LayerNormalization(nn.Module):
         # shift initializations with nn.Parameter                                #
         ##########################################################################
         # Replace "pass" statement with your code
-        pass
+        self.gamma = nn.Parameter(torch.ones(emb_dim))
+    
+        # beta 负责平移 (Shift)，初始值设为全 0
+        self.beta = nn.Parameter(torch.zeros(emb_dim))
         ##########################################################################
         #               END OF YOUR CODE                                         #
         ##########################################################################
@@ -462,7 +554,18 @@ class LayerNormalization(nn.Module):
         # the standard deviation.                                                #
         ##########################################################################
         # Replace "pass" statement with your code
-        pass
+        mean = x.mean(dim=-1, keepdim=True)
+    
+        # 2. 计算方差。手动按公式算，不用 torch.std
+        # (x - mean) 利用了广播机制，然后平方，再沿着最后维度求均值。
+        # 输出形状同样是 (N, K, 1)
+        var = ((x - mean) ** 2).mean(dim=-1, keepdim=True)
+    
+        # 3 & 4. 标准化 + 缩放与平移
+        # (x - mean) / sqrt(var + eps) 得到标准化的张量
+        # 乘以 self.gamma 加上 self.beta，PyTorch 的广播机制会自动把 (emb_dim,) 
+        # 的参数应用到每一行的 M 个特征上。
+        y = self.gamma * (x - mean) / torch.sqrt(var + self.epsilon) + self.beta
         ##########################################################################
         #               END OF YOUR CODE                                         #
         ##########################################################################
@@ -500,7 +603,20 @@ class FeedForwardBlock(nn.Module):
         # change?                                                                #
         ##########################################################################
         # Replace "pass" statement with your code
-        pass
+        self.linear1 = nn.Linear(inp_dim, hidden_dim_feedforward)
+    
+        # 2. 第二层：隐藏维度 hidden_dim_feedforward -> 输出维度 inp_dim
+        # （因为输出必须和输入维度一样，才能在 EncoderBlock 里做 x + FFN(x) 的残差连接）
+        self.linear2 = nn.Linear(hidden_dim_feedforward, inp_dim)
+    
+        # 3. 初始化权重策略 (均匀分布)
+        # 对于 linear1
+        c1 = (6 / (inp_dim + hidden_dim_feedforward)) ** 0.5
+        nn.init.uniform_(self.linear1.weight, -c1, c1)
+    
+        # 对于 linear2
+        c2 = (6 / (hidden_dim_feedforward + inp_dim)) ** 0.5
+        nn.init.uniform_(self.linear2.weight, -c2, c2)
         ##########################################################################
         #               END OF YOUR CODE                                         #
         ##########################################################################
@@ -522,7 +638,7 @@ class FeedForwardBlock(nn.Module):
         # no activation after the second MLP                                      #
         ###########################################################################
         # Replace "pass" statement with your code
-        pass
+        y = self.linear2(F.relu(self.linear1(x)))
         ##########################################################################
         #               END OF YOUR CODE                                         #
         ##########################################################################
@@ -597,7 +713,20 @@ class EncoderBlock(nn.Module):
         # 4. A Dropout layer with given dropout parameter                        #
         ##########################################################################
         # Replace "pass" statement with your code
-        pass
+        self.mha = MultiHeadAttention(num_heads=num_heads, 
+                                  dim_in=emb_dim, 
+                                  dim_out=emb_dim)
+    
+        # 2. 两个 LayerNorm 层（因为我们要用两次：一次在注意力后，一次在 FFN 后）
+        self.norm1 = LayerNormalization(emb_dim)
+        self.norm2 = LayerNormalization(emb_dim)
+    
+        # 3. 前馈神经网络块
+        self.ffn = FeedForwardBlock(inp_dim=emb_dim, 
+                                hidden_dim_feedforward=feedforward_dim)
+    
+        # 4. Dropout 层（PyTorch 自带）
+        self.dropout = nn.Dropout(dropout)
         ##########################################################################
         #               END OF YOUR CODE                                         #
         ##########################################################################
@@ -622,7 +751,19 @@ class EncoderBlock(nn.Module):
         # reference from the architecture written in the fucntion documentation. #
         ##########################################################################
         # Replace "pass" statement with your code
-        pass
+        out1 = self.mha(query=x, key=x, value=x, mask=None)
+    
+        # 2. 残差连接 (Add) -> 层归一化 (Norm) -> Dropout
+        # 注：按照你的文档注释 "layer_norm(out1 + inp) - dropout"，代码应写为：
+        out2 = self.dropout(self.norm1(x + out1))
+    
+        # 【第二部分：内部深加工】
+        # 3. 传入前馈网络进行闭门消化
+        out3 = self.ffn(out2)
+    
+        # 4. 再次：残差连接 (Add) -> 层归一化 (Norm) -> Dropout
+        # 注：依照文档注释 "layer_norm(out3 + out2) - dropout - out"
+        y = self.dropout(self.norm2(out2 + out3))
         ##########################################################################
         #               END OF YOUR CODE                                         #
         ##########################################################################
@@ -655,7 +796,23 @@ def get_subsequent_mask(seq):
     #                                                                             #
     ###############################################################################
     # Replace "pass" statement with your code
-    pass
+    # 1. 获取输入序列的形状
+    # N 是 Batch Size，K 是序列长度
+    N, K = seq.shape
+    
+    # 2. 生成一个 K x K 的全 1 矩阵
+    # torch.ones((K, K)) 会生成一个全是 1 的矩阵
+    
+    # 3. 提取上三角部分
+    # torch.triu(input, diagonal=1) 的作用是保留输入矩阵的上三角部分。
+    # diagonal=1 表示主对角线不保留，只保留主对角线往上的部分。
+    # 剩下的下三角部分会自动变成 0。
+    mask = torch.triu(torch.ones((K, K)), diagonal=1)
+    
+    # 4. 转换数据类型并扩展到 Batch 维度
+    # .bool() 会把 1 变成 True（需要遮挡），0 变成 False（正常保留）。
+    # 目前 mask 形状是 (K, K)，我们需要扩展成要求的 (N, K, K)
+    mask = mask.bool().unsqueeze(0).expand(N, -1, -1)
     ##############################################################################
     #               END OF YOUR CODE                                             #
     ##############################################################################
@@ -741,7 +898,26 @@ class DecoderBlock(nn.Module):
         ##########################################################################
 
         # Replace "pass" statement with your code
-        pass
+        self.attention_self = MultiHeadAttention(num_heads=num_heads, 
+                                             dim_in=emb_dim, 
+                                             dim_out=emb_dim)
+    
+        # 第二个是用于和 Encoder 跨频交流的（不带 Mask）
+        self.attention_cross = MultiHeadAttention(num_heads=num_heads, 
+                                              dim_in=emb_dim, 
+                                              dim_out=emb_dim)
+    
+        # 2. 前馈神经网络
+        self.feed_forward = FeedForwardBlock(inp_dim=emb_dim, 
+                                            hidden_dim_feedforward=feedforward_dim)
+    
+    # 3. 三个归一化层，分别跟在上面三个块的后面
+        self.norm1 = LayerNormalization(emb_dim)
+        self.norm2 = LayerNormalization(emb_dim)
+        self.norm3 = LayerNormalization(emb_dim)
+    
+    # 4. Dropout 层
+        self.dropout = nn.Dropout(dropout)
         ##########################################################################
         #               END OF YOUR CODE                                         #
         ##########################################################################
@@ -771,7 +947,21 @@ class DecoderBlock(nn.Module):
         # pass. Don't forget to apply the residual connections for different layers.
         ##########################################################################
         # Replace "pass" statement with your code
-        pass
+        out1 = self.attention_self(query=dec_inp, key=dec_inp, value=dec_inp, mask=mask)
+        # 残差相加 -> 归一化 -> Dropout
+        out2 = self.dropout(self.norm1(dec_inp + out1))
+    
+        # --- 模块 2：交叉注意力 (Cross-Attention) ---
+        # 重点来了！用 Decoder 的现状(out2)作为 Query，去 Encoder 的宝库(enc_inp)里找相关的 Key 和 Value
+        # 这里不需要 mask，因为原文是可以随意全局查看的
+        out3 = self.attention_cross(query=out2, key=enc_inp, value=enc_inp, mask=None)
+        # 再次残差相加（加的是进入这一层之前的 out2） -> 归一化 -> Dropout
+        out4 = self.dropout(self.norm2(out2 + out3))
+        # --- 模块 3：前馈网络深加工 (FeedForward) ---
+        # 闭门提取高阶特征
+        out5 = self.feed_forward(out4)
+        # 最后一次残差相加 -> 归一化 -> Dropout
+        y = self.dropout(self.norm3(out4 + out5))
         ##########################################################################
         #               END OF YOUR CODE                                         #
         ##########################################################################
@@ -885,7 +1075,17 @@ def position_encoding_simple(K: int, M: int) -> Tensor:
     # times to create a tensor of the required output shape                      #
     ##############################################################################
     # Replace "pass" statement with your code
-    pass
+    n_tensor = torch.arange(K, dtype=torch.float32)
+    
+    # 2. 将每个元素除以 K，得到 n/K
+    # 现在的形状是 (K,)
+    pos_values = n_tensor / K
+    
+    # 3. 复制并调整形状到 (1, K, M)
+    # 第一步：unsqueeze(1) 把 (K,) 变成 (K, 1) 的列向量
+    # 第二步：expand(K, M) 把列向量在特征维度上复制 M 次，变成 (K, M) 的矩阵
+    # 第三步：unsqueeze(0) 在最前面增加一个 Batch 维度，变成 (1, K, M)
+    y = pos_values.unsqueeze(1).expand(K, M).unsqueeze(0)
     ##############################################################################
     #               END OF YOUR CODE                                             #
     ##############################################################################
@@ -913,7 +1113,28 @@ def position_encoding_sinusoid(K: int, M: int) -> Tensor:
     # alternating sines and cosines along the embedding dimension M.             #
     ##############################################################################
     # Replace "pass" statement with your code
-    pass
+    # 1. 初始化一个形状为 (K, M) 的全零矩阵，准备填充
+    pe = torch.zeros(K, M)
+    
+    # 2. 生成绝对位置的列向量 pos:形状为 (K, 1)
+    # 也就是 [[0], [1], [2], ..., [K-1]]
+    position = torch.arange(0, K, dtype=torch.float).unsqueeze(1)
+    
+    # 3. 生成频率除数项（也就是公式里的那个大分母）
+    # 我们只需要生成 M/2 个频率，因为奇偶数维度共享同一个频率，只是用了不同的三角函数
+    # torch.exp(torch.arange(0, M, 2) * -(math.log(10000.0) / M)) 
+    # 这是一个数值稳定性更好的等价写法，相当于 1 / (10000^(2i/M))
+    div_term = torch.exp(torch.arange(0, M, 2).float() * (-math.log(10000.0) / M))
+    
+    # 4. 填充偶数维度：0, 2, 4... 用正弦 (sin)
+    # position (K, 1) 乘以 div_term (M/2,) 触发广播机制，得到 (K, M/2) 的矩阵
+    pe[:, 0::2] = torch.sin(position * div_term)
+    
+    # 5. 填充奇数维度：1, 3, 5... 用余弦 (cos)
+    pe[:, 1::2] = torch.cos(position * div_term)
+    
+    # 6. 扩展形状以匹配模型输入 (1, K, M)
+    y = pe.unsqueeze(0)
     ##############################################################################
     #               END OF YOUR CODE                                             #
     ##############################################################################
@@ -963,7 +1184,7 @@ class Transformer(nn.Module):
         # name of this layer as self.emb_layer                                   #
         ##########################################################################
         # Replace "pass" statement with your code
-        pass
+        self.emb_layer = nn.Embedding(num_embeddings=vocab_len, embedding_dim=emb_dim)
         ##########################################################################
         #               END OF YOUR CODE                                         #
         ##########################################################################
@@ -1017,7 +1238,23 @@ class Transformer(nn.Module):
         # Hint: the mask shape will depend on the Tensor ans_b
         ##########################################################################
         # Replace "pass" statement with your code
-        pass
+        # 1. 走 Encoder：把带着位置信息的原文序列送进去，得到高级特征
+        # q_emb_inp 的形状是 (N, K, M)
+        enc_out = self.encoder(q_emb_inp)
+    
+        # 2. 制作 Decoder 的面罩 (Mask)
+        # 【注意避坑！】：你的 get_subsequent_mask 函数内部解包了 N, K = seq.shape。
+        # 这意味着它要求输入是一个 2D 张量。
+        # a_emb_inp 已经是 3D (N, K, M) 了，所以你不能传它。
+        # 你必须传切片后的原始 target ID 序列 ans_b[:, :-1]，它的形状是 (N, K-1)。
+        mask = get_subsequent_mask(ans_b[:, :-1])
+    
+        # 3. 走 Decoder：拿着目标输入、Encoder的高级记忆、面罩，去生成输出
+        # 按照你在 Decoder 里的 forward 定义，依次传入：
+        # target_seq -> a_emb_inp
+        # enc_out -> enc_out
+        # mask -> mask
+        dec_out = self.decoder(a_emb_inp, enc_out, mask)
         ##########################################################################
         #               END OF YOUR CODE                                         #
         ##########################################################################
