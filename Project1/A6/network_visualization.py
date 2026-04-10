@@ -41,7 +41,22 @@ def compute_saliency_maps(X, y, model):
     # Hint: X.grad.data stores the gradients                                     #
     ##############################################################################
     # Replace "pass" statement with your code
-    pass
+    # 1. 前向传播，获取所有类别的得分
+    scores = model(X)
+    
+    # 2. 提取每个样本对应的正确类别的得分
+    # X.shape[0] 是 batch size N
+    correct_scores = scores[torch.arange(X.shape[0]), y]
+    
+    # 3. 将得分求和作为标量损失，以便我们可以对其调用 backward()
+    # 注意：这里我们是为了最大化得分，但 backward() 默认计算梯度，所以直接求和即可
+    loss = correct_scores.sum()
+    loss.backward()
+    
+    # 4. 获取输入图像的梯度，取绝对值，并在通道维度 (dim=1) 上取最大值
+    # X.grad.data 的形状是 (N, 3, H, W)
+    # torch.max 返回 (values, indices)，我们只需要 values，所以用 [0] 或解包
+    saliency, _ = torch.max(X.grad.data.abs(), dim=1)
     ##############################################################################
     #               END OF YOUR CODE                                             #
     ##############################################################################
@@ -84,7 +99,33 @@ def make_adversarial_attack(X, target_y, model, max_iter=100, verbose=True):
     # You can print your progress over iterations to check your algorithm.       #
     ##############################################################################
     # Replace "pass" statement with your code
-    pass
+    for i in range(max_iter):
+        # 前向传播
+        scores = model(X_adv)
+        
+        # 检查是否已经成功欺骗模型（预测类别等于目标类别）
+        if scores[0].argmax() == target_y:
+            if verbose:
+                print(f"Attack succeeded in {i} iterations.")
+            break
+            
+        # 获取目标类别的得分
+        target_score = scores[0, target_y]
+        
+        # 反向传播计算关于 X_adv 的梯度
+        target_score.backward()
+        
+        # 提取梯度并进行归一化
+        grad = X_adv.grad.data
+        grad_norm = torch.norm(grad, p=2)
+        
+        # 如果范数不为0，则进行梯度上升步更新 (In-place operation)
+        if grad_norm > 0:
+            dX = learning_rate * grad / grad_norm
+            X_adv.data += dX
+            
+        # 极其重要：在下一次迭代前，必须将梯度清零！
+        X_adv.grad.zero_()
     ##############################################################################
     #                             END OF YOUR CODE                               #
     ##############################################################################
@@ -119,7 +160,22 @@ def class_visualization_step(img, target_y, model, **kwargs):
     # after each step.                                                     #
     ########################################################################
     # Replace "pass" statement with your code
-    pass
+    # 1. 前向传播
+    scores = model(img)
+    target_score = scores[0, target_y]
+    
+    # 2. 反向传播计算梯度
+    target_score.backward()
+    
+    # 3. 提取梯度
+    grad = img.grad.data
+    
+    # 4. 执行梯度上升，并加入 L2 正则化的惩罚项
+    # 注意：由于是梯度上升，我们要加上得分的梯度，减去正则化的梯度
+    img.data += learning_rate * (grad - 2 * l2_reg * img.data)
+    
+    # 5. 清空梯度，为下一步做准备
+    img.grad.zero_()
     ########################################################################
     #                             END OF YOUR CODE                         #
     ########################################################################

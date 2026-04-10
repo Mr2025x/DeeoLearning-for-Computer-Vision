@@ -5,10 +5,8 @@ import torch.utils.data
 from torch import nn
 from torch.nn import functional as F
 
-
 def hello_vae():
     print("Hello from vae.py!")
-
 
 class VAE(nn.Module):
     def __init__(self, input_size, latent_size=15):
@@ -32,7 +30,14 @@ class VAE(nn.Module):
         # be tensors of shape (N, Z).                                             #
         ###########################################################################
         # Replace "pass" statement with your code
-        pass
+        self.hidden_dim = 400 # 你可以自己设定一个隐藏层维度
+
+        # Encoder 提取特征
+        self.encoder = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(self.input_size, self.hidden_dim),
+            nn.ReLU()
+        )
         ###########################################################################
         # TODO: Implement the fully-connected decoder architecture described in   #
         # the notebook. Specifically, self.decoder should be a network that inputs#
@@ -40,7 +45,17 @@ class VAE(nn.Module):
         # estimated images of shape (N, 1, H, W).                                 #
         ###########################################################################
         # Replace "pass" statement with your code
-        pass
+        # 映射到潜变量空间的均值和对数方差
+        self.mu_layer = nn.Linear(self.hidden_dim, self.latent_size)
+        self.logvar_layer = nn.Linear(self.hidden_dim, self.latent_size)
+
+        # Decoder 重建图像
+        self.decoder = nn.Sequential(
+            nn.Linear(self.latent_size, self.hidden_dim),
+            nn.ReLU(),
+            nn.Linear(self.hidden_dim, self.input_size),
+            nn.Sigmoid() # 输出归一化的像素值
+        )
         ###########################################################################
         #                                      END OF YOUR CODE                   #
         ###########################################################################
@@ -71,7 +86,20 @@ class VAE(nn.Module):
         # (3) Pass z through the decoder to resconstruct x                        #
         ###########################################################################
         # Replace "pass" statement with your code
-        pass
+        # 建议的实现思路 (在 forward 的 pass 处):
+        features = self.encoder(x)
+        mu = self.mu_layer(features)
+        logvar = self.logvar_layer(features)
+
+        # (2) 重参数化抽样得到 z
+        z = reparametrize(mu, logvar)
+
+        # (3) 解码并恢复原始形状
+        out = self.decoder(z)
+        # 根据注释，x_hat 应该是 (N, 1, H, W) 形状，这里假设输入图片是正方形
+        H = W = int(self.input_size ** 0.5) 
+        x_hat = out.view(-1, 1, H, W)
+        
         ###########################################################################
         #                                      END OF YOUR CODE                   #
         ###########################################################################
@@ -98,7 +126,15 @@ class CVAE(nn.Module):
         # log-variance estimates of the latent space (N, Z)                       #
         ###########################################################################
         # Replace "pass" statement with your code
-        pass
+        # Encoder: 接收拼接后的输入 (H*W + C) -> 隐藏层 (H_d)
+        self.encoder = nn.Sequential(
+            nn.Linear(self.input_size + self.num_classes, self.hidden_dim),
+            nn.ReLU()
+        )
+        
+        # 映射层: 隐藏层 (H_d) -> 均值和对数方差 (Z)
+        self.mu_layer = nn.Linear(self.hidden_dim, self.latent_size)
+        self.logvar_layer = nn.Linear(self.hidden_dim, self.latent_size)
 
         ###########################################################################
         # TODO: Define a fully-connected decoder as described in the notebook that#
@@ -106,7 +142,13 @@ class CVAE(nn.Module):
         # (N, 1, H, W).                                                           #
         ###########################################################################
         # Replace "pass" statement with your code
-        pass
+        # Decoder: 接收拼接后的潜变量 (Z + C) -> 隐藏层 (H_d) -> 恢复图像特征 (H*W)
+        self.decoder = nn.Sequential(
+            nn.Linear(self.latent_size + self.num_classes, self.hidden_dim),
+            nn.ReLU(),
+            nn.Linear(self.hidden_dim, self.input_size),
+            nn.Sigmoid()  # 将输出限制在 0-1 之间，表示图像像素的概率/强度
+        )
         ###########################################################################
         #                                      END OF YOUR CODE                   #
         ###########################################################################
@@ -139,7 +181,35 @@ class CVAE(nn.Module):
         #     resconstruct x                                                      #
         ###########################################################################
         # Replace "pass" statement with your code
-        pass
+        # 1. 编码阶段 (Encoder)
+        N = x.shape[0]
+        # 将图像展平: (N, 1, H, W) -> (N, H*W)
+        x_flat = x.view(N, -1)
+        # 将图像与 one-hot 条件向量在特征维度（dim=1）进行拼接: -> (N, H*W + C)
+        enc_input = torch.cat([x_flat, c], dim=1)
+        
+        # 提取隐藏层特征: -> (N, H_d)
+        hidden_feat = self.encoder(enc_input)
+        
+        # 计算均值和对数方差: -> (N, Z)
+        mu = self.mu_layer(hidden_feat)
+        logvar = self.logvar_layer(hidden_feat)
+        
+        # 2. 重参数化阶段 (Reparameterization)
+        # 抽样得到隐变量 z: -> (N, Z)
+        # 注意：这里假设 reparametrize 函数在你的文件上方已经定义好了
+        z = reparametrize(mu, logvar)
+        
+        # 3. 解码阶段 (Decoder)
+        # 将隐变量与 one-hot 条件向量再次拼接: -> (N, Z + C)
+        dec_input = torch.cat([z, c], dim=1)
+        
+        # 通过解码器还原成展平的图像: -> (N, H*W)
+        out_flat = self.decoder(dec_input)
+        
+        # 重塑回原始图像的形状: (N, H*W) -> (N, 1, H, W)
+        # 这里直接借用 x.shape 可以自动适应 H 和 W 的尺寸
+        x_hat = out_flat.view(x.shape)
         ###########################################################################
         #                                      END OF YOUR CODE                   #
         ###########################################################################
@@ -175,7 +245,13 @@ def reparametrize(mu, logvar):
     # scaling by posterior mu and sigma to estimate z                             #
     ###############################################################################
     # Replace "pass" statement with your code
-    pass
+    # 建议的实现思路 (在 reparametrize 的 pass 处):
+    # 1. 计算标准差 sigma
+    std = torch.exp(0.5 * logvar)
+    # 2. 生成和 std 形状一样的标准正态分布噪声 epsilon
+    eps = torch.randn_like(std)
+    # 3. 计算 z
+    z = mu + eps * std
     ###############################################################################
     #                              END OF YOUR CODE                               #
     ###############################################################################
@@ -205,7 +281,19 @@ def loss_function(x_hat, x, mu, logvar):
     # notebook                                                                    #
     ###############################################################################
     # Replace "pass" statement with your code
-    pass
+    # 建议的实现思路 (在 loss_function 的 pass 处):
+    # 1. 重建误差 (Reconstruction Loss) - 使用 BCE，使用 reduction='sum'
+    # 注意 x_hat 和 x 的形状都是 (N, 1, H, W)
+    recon_loss = F.binary_cross_entropy(x_hat, x, reduction='sum')
+
+    # 2. KL 散度 (KL Divergence)
+    # sum 沿着所有的维度求和
+    kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
+
+    # 3. 总 Loss
+    loss = recon_loss + kl_loss
+    # 有时候为了稳定，会除以 batch_size (N = x.shape[0])，具体看你作业 notebook 里的测试用例要求。
+    # 如果测试用例报错，尝试: loss = (recon_loss + kl_loss) / x.shape[0]
     ###############################################################################
     #                            END OF YOUR CODE                                 #
     ###############################################################################

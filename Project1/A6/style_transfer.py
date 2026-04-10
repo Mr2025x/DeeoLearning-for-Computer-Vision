@@ -31,7 +31,7 @@ def content_loss(content_weight, content_current, content_original):
     # TODO: Compute the content loss for style transfer.                       #
     ############################################################################
     # Replace "pass" statement with your code
-    pass
+    return content_weight * torch.sum((content_current - content_original) ** 2)
     ############################################################################
     #                               END OF YOUR CODE                           #
     ############################################################################
@@ -57,7 +57,15 @@ def gram_matrix(features, normalize=True):
     # Don't forget to implement for both normalized and non-normalized version #
     ############################################################################
     # Replace "pass" statement with your code
-    pass
+    N, C, H, W = features.shape
+    # 将 H 和 W 维度展平
+    features_flat = features.view(N, C, H * W)
+    
+    # 计算批量矩阵乘法: (N, C, H*W) x (N, H*W, C) -> (N, C, C)
+    gram = torch.bmm(features_flat, features_flat.transpose(1, 2))
+    
+    if normalize:
+        gram /= (H * W * C)
     ############################################################################
     #                               END OF YOUR CODE                           #
     ############################################################################
@@ -89,7 +97,14 @@ def style_loss(feats, style_layers, style_targets, style_weights):
     # You will need to use your gram_matrix function.                          #
     ############################################################################
     # Replace "pass" statement with your code
-    pass
+    loss = 0.0
+    # 遍历所有需要计算风格的层
+    for i, layer_idx in enumerate(style_layers):
+        # 取出当前层的特征，计算其 Gram 矩阵
+        current_gram = gram_matrix(feats[layer_idx])
+        # 计算当前层的风格损失并累加
+        loss += style_weights[i] * torch.sum((current_gram - style_targets[i]) ** 2)
+    return loss
     ############################################################################
     #                               END OF YOUR CODE                           #
     ############################################################################
@@ -139,7 +154,24 @@ def guided_gram_matrix(features, masks, normalize=True):
   # this problem.                                                              #
   ##############################################################################
   # Replace "pass" statement with your code
-  pass
+  N, R, C, H, W = features.shape
+    # masks 目前是 (N, R, H, W)，需要扩展一个通道维度 (N, R, 1, H, W) 才能与特征相乘
+  masks = masks.unsqueeze(2)
+    
+    # 将 mask 应用到特征上
+  masked_features = features * masks
+    
+    # 为了复用批量矩阵乘法逻辑，我们把 N 和 R 合并到批次维度
+  masked_features = masked_features.view(N * R, C, H * W)
+    
+    # 计算 Gram 矩阵
+  guided_gram = torch.bmm(masked_features, masked_features.transpose(1, 2))
+    
+  if normalize:
+        guided_gram /= (H * W * C)
+        
+    # 把形状恢复为 (N, R, C, C)
+  return guided_gram.view(N, R, C, C)
   ##############################################################################
   #                               END OF YOUR CODE                             #
   ##############################################################################
@@ -169,7 +201,26 @@ def guided_style_loss(feats, style_layers, style_targets, style_weights, content
     # TODO: Computes the guided style loss at a set of layers.                 #
     ############################################################################
     # Replace "pass" statement with your code
-    pass
+    loss = 0.0
+    for i, layer_idx in enumerate(style_layers):
+        current_feat = feats[layer_idx]
+        current_mask = content_masks[layer_idx]
+        
+        # 将当前特征维度扩展为 (N, 1, C, H, W) 以匹配 mask 的区域逻辑
+        # 假设只有一个大区域或者这里需要根据上下文推断特征扩展方式
+        N, C, H, W = current_feat.shape
+        R = current_mask.shape[1]
+        
+        # 将特征在 R 维度上复制
+        current_feat_expanded = current_feat.unsqueeze(1).expand(N, R, C, H, W)
+        
+        # 计算 guided gram matrix
+        current_guided_gram = guided_gram_matrix(current_feat_expanded, current_mask)
+        
+        # 计算损失
+        loss += style_weights[i] * torch.sum((current_guided_gram - style_targets[i]) ** 2)
+        
+    return loss
     ############################################################################
     #                               END OF YOUR CODE                           #
     ############################################################################
